@@ -2,7 +2,6 @@ package stream
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"time"
 
@@ -25,6 +24,10 @@ type Stats struct {
 	Fetches int
 	// Retries counts fetches that failed and were retried.
 	Retries int
+	// Gaps counts retention gaps the stream detected.
+	Gaps int
+	// Recovered counts gaps the stream skipped past under GapResume.
+	Recovered int
 }
 
 // Options configures a Tailer.
@@ -47,6 +50,14 @@ type Options struct {
 	// OnRetry, when set, is called before each backoff wait so the CLI can
 	// tell the user what is happening rather than appearing to hang.
 	OnRetry func(attempt int, delay time.Duration, err error)
+	// GapStrategy selects what to do when the server has pruned records.
+	// The empty value means GapFail.
+	GapStrategy GapStrategy
+	// MaxGapRecoveries bounds how many times GapResume may skip ahead. Zero
+	// means no bound.
+	MaxGapRecoveries int
+	// OnGap, when set, is called for every detected gap.
+	OnGap func(GapEvent)
 }
 
 // Tailer drives a Source, emitting records to a Sink.
@@ -83,7 +94,8 @@ type Tailer struct {
 	// correctly, which is what makes de-duplication a single comparison.
 	lastID string
 
-	stats Stats
+	stats    Stats
+	recovery GapRecovery
 }
 
 // NewTailer returns a Tailer wired to src and sink.
@@ -97,7 +109,20 @@ func NewTailer(src Source, sink Sink, opts Options) *Tailer {
 	if opts.Backoff.Initial == 0 && opts.Backoff.Max == 0 {
 		opts.Backoff = DefaultBackoff()
 	}
-	return &Tailer{src: src, sink: sink, opts: opts}
+	strategy, err := ParseGapStrategy(string(opts.GapStrategy))
+	if err != nil {
+		strategy = GapFail
+	}
+	return &Tailer{
+		src:  src,
+		sink: sink,
+		opts: opts,
+		recovery: GapRecovery{
+			Strategy:      strategy,
+			MaxRecoveries: opts.MaxGapRecoveries,
+			OnGap:         opts.OnGap,
+		},
+	}
 }
 
 // Stats returns a snapshot of what the run has done so far.
@@ -126,14 +151,23 @@ func (t *Tailer) Run(ctx context.Context) error {
 
 		batch, err := t.fetchWithRetry(ctx)
 		if err != nil {
-			if isCancellation(err) {
+			if IsCancellation(err) {
 				return t.finish(nil)
 			}
 			return err
 		}
 
-		if err := t.checkGap(batch); err != nil {
-			return err
+		if gapErr := t.checkGap(batch); gapErr != nil {
+			t.stats.Gaps++
+			recovered, recoverErr := t.recovery.Handle(t.src, gapErr)
+			if recoverErr != nil {
+				return recoverErr
+			}
+			if recovered {
+				t.stats.Recovered = t.recovery.Recovered()
+				t.cursor = ""
+				continue
+			}
 		}
 
 		done, err := t.emit(batch)
@@ -188,7 +222,7 @@ func (t *Tailer) fetchWithRetry(ctx context.Context) (Batch, error) {
 			return batch, nil
 		}
 
-		if isCancellation(err) {
+		if IsCancellation(err) {
 			return Batch{}, err
 		}
 		if !rpc.IsRetryable(err) {
@@ -220,7 +254,7 @@ func (t *Tailer) fetchWithRetry(ctx context.Context) (Batch, error) {
 // It only applies once a cursor exists: the first fetch has not resumed from
 // anywhere, and an out-of-range start ledger is rejected by the server with a
 // clearer message than this check could produce.
-func (t *Tailer) checkGap(b Batch) error {
+func (t *Tailer) checkGap(b Batch) *GapError {
 	if t.cursor == "" || b.Oldest == 0 {
 		return nil
 	}
@@ -257,8 +291,4 @@ func (t *Tailer) emit(b Batch) (done bool, err error) {
 		}
 	}
 	return false, nil
-}
-
-func isCancellation(err error) bool {
-	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 }

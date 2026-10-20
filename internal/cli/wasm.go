@@ -39,6 +39,10 @@ Failed transactions are skipped unless --include-failed is set.`,
   prism wasm --follow --json | jq -r 'select(.action=="create") | .contract'`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := sf.validate(); err != nil {
+				return err
+			}
+
 			client, closeClient, err := openClient(g, stderr)
 			if err != nil {
 				return err
@@ -54,16 +58,15 @@ Failed transactions are skipped unless --include-failed is set.`,
 				from = latest
 			}
 
-			src, err := stream.NewWASMSource(client, stream.WASMQuery{
-				StartLedger:       from,
-				PageLimit:         sf.pageSize,
-				NetworkPassphrase: networkPassphrase,
-				IncludeFailed:     includeFailed,
-			})
-			if err != nil {
-				return err
+			newSource := func(startLedger uint32) (stream.Source, error) {
+				return stream.NewWASMSource(client, stream.WASMQuery{
+					StartLedger:       startLedger,
+					PageLimit:         sf.pageSize,
+					NetworkPassphrase: networkPassphrase,
+					IncludeFailed:     includeFailed,
+				})
 			}
-			return runStream(cmd.Context(), src, &sf, g, stdout, stderr)
+			return runStream(cmd.Context(), newSource, from, &sf, g, stdout, stderr)
 		},
 	}
 

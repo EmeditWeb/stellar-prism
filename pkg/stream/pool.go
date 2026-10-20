@@ -371,7 +371,7 @@ func poolCall[T any](p *Pool, ctx context.Context, op string, fn func(rpc.Client
 			p.markSuccess(ep)
 			return result, nil
 		}
-		if rpc.IsPermanent(err) || isCancellation(err) {
+		if rpc.IsPermanent(err) || IsCancellation(err) {
 			return zero, err
 		}
 

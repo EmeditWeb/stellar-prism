@@ -21,6 +21,10 @@ Transactions can be streamed continuously by using the --follow flag.`,
   prism transactions --from 1234567 --limit 5 --json`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := sf.validate(); err != nil {
+				return err
+			}
+
 			client, closeClient, err := openClient(g, stderr)
 			if err != nil {
 				return err
@@ -36,11 +40,13 @@ Transactions can be streamed continuously by using the --follow flag.`,
 				from = latest
 			}
 
-			src := stream.NewTransactionSource(client, stream.TransactionQuery{
-				StartLedger: from,
-				PageLimit:   sf.pageSize,
-			})
-			return runStream(cmd.Context(), src, &sf, g, stdout, stderr)
+			newSource := func(startLedger uint32) (stream.Source, error) {
+				return stream.NewTransactionSource(client, stream.TransactionQuery{
+					StartLedger: startLedger,
+					PageLimit:   sf.pageSize,
+				}), nil
+			}
+			return runStream(cmd.Context(), newSource, from, &sf, g, stdout, stderr)
 		},
 	}
 

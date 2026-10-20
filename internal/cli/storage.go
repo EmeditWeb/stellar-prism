@@ -38,6 +38,10 @@ omits them and shows only that contract's data.`,
   prism storage --entry contract_code --entry ttl --json | jq -r '.wasmHash'`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
+			if err := sf.validate(); err != nil {
+				return err
+			}
+
 			client, closeClient, err := openClient(g, stderr)
 			if err != nil {
 				return err
@@ -53,17 +57,16 @@ omits them and shows only that contract's data.`,
 				from = latest
 			}
 
-			src, err := stream.NewStorageChangeSource(client, stream.StorageChangeQuery{
-				StartLedger: from,
-				PageLimit:   sf.pageSize,
-				ContractIDs: contractIDs,
-				ChangeTypes: changeTypes,
-				EntryTypes:  entryTypes,
-			})
-			if err != nil {
-				return err
+			newSource := func(startLedger uint32) (stream.Source, error) {
+				return stream.NewStorageChangeSource(client, stream.StorageChangeQuery{
+					StartLedger: startLedger,
+					PageLimit:   sf.pageSize,
+					ContractIDs: contractIDs,
+					ChangeTypes: changeTypes,
+					EntryTypes:  entryTypes,
+				})
 			}
-			return runStream(cmd.Context(), src, &sf, g, stdout, stderr)
+			return runStream(cmd.Context(), newSource, from, &sf, g, stdout, stderr)
 		},
 	}
 
