@@ -100,6 +100,42 @@ type transactionLine struct {
 	ResultMetaXDR string          `json:"resultMetaXdr,omitempty"`
 }
 
+// storageChangeLine is the documented NDJSON shape for a storage mutation.
+type storageChangeLine struct {
+	Kind       string          `json:"kind"`
+	ID         string          `json:"id"`
+	Ledger     uint32          `json:"ledger"`
+	Time       string          `json:"time,omitempty"`
+	ChangeType string          `json:"changeType,omitempty"`
+	EntryType  string          `json:"entryType,omitempty"`
+	ContractID string          `json:"contract,omitempty"`
+	Durability string          `json:"durability,omitempty"`
+	KeyHash    string          `json:"keyHash,omitempty"`
+	WASMHash   string          `json:"wasmHash,omitempty"`
+	Key        json.RawMessage `json:"key,omitempty"`
+	Entry      json.RawMessage `json:"entry,omitempty"`
+	Change     json.RawMessage `json:"change,omitempty"`
+	KeyXDR     string          `json:"keyXdr,omitempty"`
+	EntryXDR   string          `json:"entryXdr,omitempty"`
+	ChangeXDR  string          `json:"changeXdr,omitempty"`
+}
+
+// wasmLine is the documented NDJSON shape for a deployment host function.
+type wasmLine struct {
+	Kind       string `json:"kind"`
+	ID         string `json:"id"`
+	Ledger     uint32 `json:"ledger"`
+	Time       string `json:"time,omitempty"`
+	Action     string `json:"action,omitempty"`
+	ContractID string `json:"contract,omitempty"`
+	WASMHash   string `json:"wasmHash,omitempty"`
+	WASMSize   int    `json:"wasmSize,omitempty"`
+	Executable string `json:"executable,omitempty"`
+	TxHash     string `json:"tx,omitempty"`
+	OpIndex    uint32 `json:"opIndex"`
+	Successful bool   `json:"successful"`
+}
+
 // Emit implements stream.Sink.
 func (n *NDJSON) Emit(r stream.Record) error {
 	var payload any
@@ -201,6 +237,69 @@ func (n *NDJSON) Emit(r stream.Record) error {
 				line.ResultXDR = r.Transaction.ResultXDR
 				line.ResultMetaXDR = r.Transaction.ResultMetaXDR
 			}
+		}
+		payload = line
+
+	case stream.KindStorageChange:
+		line := storageChangeLine{
+			Kind:   string(r.Kind),
+			ID:     r.ID,
+			Ledger: r.Sequence,
+			Time:   formatTime(r.Time),
+		}
+		if c := r.StorageChange; c != nil {
+			line.ChangeType = c.ChangeType
+			line.EntryType = c.EntryType
+			line.ContractID = c.ContractID
+			line.Durability = c.Durability
+			line.KeyHash = c.KeyHash
+			line.WASMHash = c.WASMHash
+			if n.decode {
+				if c.KeyXDR != "" {
+					raw, err := n.decodeXDR(c.KeyXDR)
+					if err != nil {
+						return err
+					}
+					line.Key = raw
+				}
+				if c.EntryXDR != "" {
+					raw, err := n.decodeXDR(c.EntryXDR)
+					if err != nil {
+						return err
+					}
+					line.Entry = raw
+				}
+				if c.ChangeXDR != "" {
+					raw, err := n.decodeXDR(c.ChangeXDR)
+					if err != nil {
+						return err
+					}
+					line.Change = raw
+				}
+			} else {
+				line.KeyXDR = c.KeyXDR
+				line.EntryXDR = c.EntryXDR
+				line.ChangeXDR = c.ChangeXDR
+			}
+		}
+		payload = line
+
+	case stream.KindWASMDeployment:
+		line := wasmLine{
+			Kind:   string(r.Kind),
+			ID:     r.ID,
+			Ledger: r.Sequence,
+			Time:   formatTime(r.Time),
+		}
+		if w := r.WASMDeployment; w != nil {
+			line.Action = w.Action
+			line.ContractID = w.ContractID
+			line.WASMHash = w.WASMHash
+			line.WASMSize = w.WASMSize
+			line.Executable = w.Executable
+			line.TxHash = w.TxHash
+			line.OpIndex = w.OpIndex
+			line.Successful = w.Successful
 		}
 		payload = line
 

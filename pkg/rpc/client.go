@@ -54,16 +54,42 @@ type Client interface {
 	GetLatestLedger(ctx context.Context) (protocol.GetLatestLedgerResponse, error)
 }
 
-// ResolveURL picks the RPC endpoint from, in order of precedence: an explicit
-// flag value, the SOROBAN_RPC_URL environment variable, then DefaultURL.
+// ResolveURL picks a single RPC endpoint from, in order of precedence: an
+// explicit flag value, the SOROBAN_RPC_URL environment variable, then
+// DefaultURL.
+//
+// It is kept for callers that only support one endpoint; ResolveURLs is the
+// form used by the CLI, where a failover pool may be configured.
 func ResolveURL(flagValue string) string {
-	if flagValue != "" {
-		return flagValue
+	return ResolveURLs([]string{flagValue})[0]
+}
+
+// ResolveURLs picks the RPC endpoints from, in order of precedence: explicit
+// flag values, the SOROBAN_RPC_URL environment variable, then DefaultURL.
+//
+// Multiple endpoints may be configured by repeating --rpc-url, or by
+// separating them with commas in SOROBAN_RPC_URL. Blank entries are ignored.
+func ResolveURLs(flagValues []string) []string {
+	urls := cleanURLs(flagValues)
+	if len(urls) > 0 {
+		return urls
 	}
 	if env := strings.TrimSpace(os.Getenv(URLEnvVar)); env != "" {
-		return env
+		if urls := cleanURLs(strings.Split(env, ",")); len(urls) > 0 {
+			return urls
+		}
 	}
-	return DefaultURL
+	return []string{DefaultURL}
+}
+
+func cleanURLs(values []string) []string {
+	urls := make([]string, 0, len(values))
+	for _, value := range values {
+		if url := strings.TrimSpace(value); url != "" {
+			urls = append(urls, url)
+		}
+	}
+	return urls
 }
 
 // SDKClient adapts the Stellar SDK's RPC client to the Client interface.

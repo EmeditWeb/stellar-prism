@@ -30,6 +30,12 @@ type streamFlags struct {
 	poll     time.Duration
 	pageSize uint
 	retries  int
+
+	output         string
+	rotateSize     int64
+	rotateInterval time.Duration
+	rotateCompress bool
+	rotateKeep     int
 }
 
 func (s *streamFlags) register(cmd *cobra.Command, defaultPage uint) {
@@ -51,14 +57,42 @@ func (s *streamFlags) register(cmd *cobra.Command, defaultPage uint) {
 		"how many records to request per RPC call")
 	cmd.Flags().IntVar(&s.retries, "max-retries", 0,
 		"give up after this many consecutive RPC failures (0 means never give up)")
+	cmd.Flags().StringVar(&s.output, "output-file", "",
+		"append records to this file instead of stdout")
+	cmd.Flags().Int64Var(&s.rotateSize, "rotate-size", 0,
+		"rotate the output file before a write would exceed this many bytes (0 disables)")
+	cmd.Flags().DurationVar(&s.rotateInterval, "rotate-interval", 0,
+		"rotate the output file after this long (0 disables)")
+	cmd.Flags().BoolVar(&s.rotateCompress, "rotate-compress", false,
+		"gzip rotated output files")
+	cmd.Flags().IntVar(&s.rotateKeep, "rotate-keep", 0,
+		"keep at most this many rotated files (0 keeps all)")
 }
 
-// newSink builds the output sink implied by the flags.
-func (s *streamFlags) newSink(w io.Writer, colorMode string) stream.Sink {
-	if s.asJSON {
-		return sink.NewNDJSON(w, !s.raw)
+// newSink builds the output sink implied by the flags. With --output-file the
+// chosen format is built on top of a rotating writer, so every streaming
+// command supports rotation without its own plumbing.
+func (s *streamFlags) newSink(w io.Writer, colorMode string) (stream.Sink, error) {
+	build := func(out io.Writer) stream.Sink {
+		if s.asJSON {
+			return sink.NewNDJSON(out, !s.raw)
+		}
+		return sink.NewHuman(out, lensformat.PaletteFor(out, colorMode), s.compact || s.raw)
 	}
-	return sink.NewHuman(w, lensformat.PaletteFor(w, colorMode), s.compact || s.raw)
+
+	if s.output == "" {
+		if s.rotateSize != 0 || s.rotateInterval != 0 || s.rotateCompress || s.rotateKeep != 0 {
+			return nil, fmt.Errorf("--rotate-* flags require --output-file")
+		}
+		return build(w), nil
+	}
+
+	return sink.NewFileRotator(s.output, build, sink.RotatorOptions{
+		MaxSize:    s.rotateSize,
+		MaxAge:     s.rotateInterval,
+		MaxBackups: s.rotateKeep,
+		Compress:   s.rotateCompress,
+	})
 }
 
 // options builds the tailer options implied by the flags.
@@ -118,7 +152,11 @@ reports the missed ledger range and exits 2 rather than skipping silently.`,
   prism events --from 1234567 --follow`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client := newClient(rpc.ResolveURL(g.rpcURL), g.timeout)
+			client, closeClient, err := openClient(g, stderr)
+			if err != nil {
+				return err
+			}
+			defer closeClient()
 
 			from := sf.from
 			if from == 0 {
@@ -174,7 +212,11 @@ for liveness rather than reading contents.`,
   prism ledgers --from 1234567 --limit 5 --json`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client := newClient(rpc.ResolveURL(g.rpcURL), g.timeout)
+			client, closeClient, err := openClient(g, stderr)
+			if err != nil {
+				return err
+			}
+			defer closeClient()
 
 			from := sf.from
 			if from == 0 {
@@ -214,10 +256,21 @@ func runStream(
 	ctx, stop := signal.NotifyContext(ctx, os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	out := sf.newSink(stdout, g.color)
+	out, err := sf.newSink(stdout, g.color)
+	if err != nil {
+		return err
+	}
 	tailer := stream.NewTailer(src, out, sf.options(stderr, sf.asJSON && stderr == nil))
 
-	err := tailer.Run(ctx)
+	if closer, ok := out.(io.Closer); ok {
+		defer func() {
+			if err := closer.Close(); err != nil {
+				fmt.Fprintf(stderr, "prism: closing output: %v\n", err)
+			}
+		}()
+	}
+
+	err = tailer.Run(ctx)
 
 	var gap *stream.GapError
 	if errors.As(err, &gap) {

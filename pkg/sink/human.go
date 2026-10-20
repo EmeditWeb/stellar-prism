@@ -66,6 +66,14 @@ func (h *Human) Emit(r stream.Record) error {
 		if err := h.emitTransaction(r); err != nil {
 			return err
 		}
+	case stream.KindStorageChange:
+		if err := h.emitStorageChange(r); err != nil {
+			return err
+		}
+	case stream.KindWASMDeployment:
+		if err := h.emitWASMDeployment(r); err != nil {
+			return err
+		}
 	default:
 		return fmt.Errorf("human: unknown record kind %q", r.Kind)
 	}
@@ -182,6 +190,105 @@ func (h *Human) emitTransaction(r stream.Record) error {
 	if t.ResultMetaXDR != "" {
 		if err := h.writePayload("meta", t.ResultMetaXDR); err != nil {
 			return err
+		}
+	}
+	return nil
+}
+
+func (h *Human) emitStorageChange(r stream.Record) error {
+	p := h.palette
+	c := r.StorageChange
+	if c == nil {
+		return fmt.Errorf("human: storage change record %s has no payload", r.ID)
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s%s%s  %sledger %d%s  %s%s%s  %s%s%s",
+		p.Note, formatTime(r.Time), p.Reset,
+		p.Dim, r.Sequence, p.Reset,
+		p.Type, c.ChangeType, p.Reset,
+		p.Key, c.EntryType, p.Reset,
+	)
+	if c.ContractID != "" {
+		fmt.Fprintf(&b, "  %s%s%s", p.Key, shorten(c.ContractID), p.Reset)
+	}
+	if c.Durability != "" {
+		fmt.Fprintf(&b, "  %s%s%s", p.Dim, c.Durability, p.Reset)
+	}
+	if c.WASMHash != "" {
+		fmt.Fprintf(&b, "  %swasm %s%s", p.Dim, shorten(c.WASMHash), p.Reset)
+	}
+	if c.KeyHash != "" {
+		fmt.Fprintf(&b, "  %skey %s%s", p.Dim, shorten(c.KeyHash), p.Reset)
+	}
+	b.WriteString("\n")
+
+	if _, err := h.w.WriteString(b.String()); err != nil {
+		return fmt.Errorf("human: write: %w", err)
+	}
+	if h.compact {
+		return nil
+	}
+
+	for _, payload := range []struct {
+		label string
+		xdr   string
+	}{
+		{"key", c.KeyXDR},
+		{"entry", c.EntryXDR},
+		{"change", c.ChangeXDR},
+	} {
+		if payload.xdr == "" {
+			continue
+		}
+		if err := h.writePayload(payload.label, payload.xdr); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (h *Human) emitWASMDeployment(r stream.Record) error {
+	p := h.palette
+	w := r.WASMDeployment
+	if w == nil {
+		return fmt.Errorf("human: wasm record %s has no payload", r.ID)
+	}
+
+	var b strings.Builder
+	fmt.Fprintf(&b, "%s%s%s  %sledger %d%s  %s%s%s",
+		p.Note, formatTime(r.Time), p.Reset,
+		p.Dim, r.Sequence, p.Reset,
+		p.Type, w.Action, p.Reset,
+	)
+	if w.ContractID != "" {
+		fmt.Fprintf(&b, "  %s%s%s", p.Key, shorten(w.ContractID), p.Reset)
+	}
+	if w.TxHash != "" {
+		fmt.Fprintf(&b, "  %stx %s%s", p.Dim, shorten(w.TxHash), p.Reset)
+	}
+	if !w.Successful {
+		fmt.Fprintf(&b, "  %sfailed%s", p.Remove, p.Reset)
+	}
+	b.WriteString("\n")
+
+	if _, err := h.w.WriteString(b.String()); err != nil {
+		return fmt.Errorf("human: write: %w", err)
+	}
+	if h.compact {
+		return nil
+	}
+
+	if w.WASMHash != "" {
+		if _, err := fmt.Fprintf(h.w, "  %swasm %s (%d bytes)%s\n",
+			p.Key, w.WASMHash, w.WASMSize, p.Reset); err != nil {
+			return fmt.Errorf("human: write: %w", err)
+		}
+	}
+	if w.Executable != "" {
+		if _, err := fmt.Fprintf(h.w, "  %sexecutable %s%s\n",
+			p.Key, w.Executable, p.Reset); err != nil {
+			return fmt.Errorf("human: write: %w", err)
 		}
 	}
 	return nil
