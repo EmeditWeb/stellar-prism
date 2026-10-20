@@ -5,7 +5,6 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"github.com/stellar-optics/stellar-prism/pkg/rpc"
 	"github.com/stellar-optics/stellar-prism/pkg/stream"
 )
 
@@ -22,7 +21,11 @@ Transactions can be streamed continuously by using the --follow flag.`,
   prism transactions --from 1234567 --limit 5 --json`,
 		Args: cobra.NoArgs,
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client := newClient(rpc.ResolveURL(g.rpcURL), g.timeout)
+			client, closeClient, err := openClient(g, stderr)
+			if err != nil {
+				return err
+			}
+			defer closeClient()
 
 			from := sf.from
 			if from == 0 {

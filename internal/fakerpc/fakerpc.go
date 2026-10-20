@@ -70,7 +70,10 @@ type Server struct {
 
 	// tx maps a hash to a canned transaction response.
 	tx map[string]protocol.GetTransactionResponse
-	// txs is the canned response for getTransactions.
+	// transactions is the ordered universe served by a transaction fake.
+	transactions []protocol.TransactionInfo
+	// txs is a canned response for getTransactions, used when transactions
+	// is empty.
 	txs protocol.GetTransactionsResponse
 }
 
@@ -107,6 +110,27 @@ func NewServer(events []protocol.EventInfo, opts ...Option) *Server {
 		s.latest = uint32(events[len(events)-1].Ledger) //nolint:gosec // test data
 		if s.oldest == 0 {
 			s.oldest = uint32(events[0].Ledger) //nolint:gosec // test data
+		}
+	}
+	return s
+}
+
+// NewTransactionServer returns a fake serving the given transactions with the
+// same cursor semantics as the real getTransactions endpoint.
+func NewTransactionServer(txs []protocol.TransactionInfo, opts ...Option) *Server {
+	s := &Server{
+		transactions: txs,
+		pageLimit:    100,
+		script:       map[int]Behaviour{},
+		tx:           map[string]protocol.GetTransactionResponse{},
+	}
+	for _, o := range opts {
+		o(s)
+	}
+	if len(txs) > 0 {
+		s.latest = txs[len(txs)-1].Ledger
+		if s.oldest == 0 {
+			s.oldest = txs[0].Ledger
 		}
 	}
 	return s
@@ -358,7 +382,70 @@ func (s *Server) GetTransactions(ctx context.Context, req protocol.GetTransactio
 	if err := ctx.Err(); err != nil {
 		return protocol.GetTransactionsResponse{}, err
 	}
-	return s.txs, nil
+	if len(s.transactions) == 0 {
+		return s.txs, nil
+	}
+
+	call := s.calls
+	s.calls++
+	b := s.script[call]
+	if b.Err != nil {
+		return protocol.GetTransactionsResponse{}, b.Err
+	}
+
+	oldest, latest := s.oldest, s.latest
+	if b.OldestLedger != 0 {
+		oldest = b.OldestLedger
+	}
+	if b.LatestLedger != 0 {
+		latest = b.LatestLedger
+	}
+
+	hasCursor := req.Pagination != nil && req.Pagination.Cursor != ""
+
+	respond := func(page []protocol.TransactionInfo) protocol.GetTransactionsResponse {
+		resp := protocol.GetTransactionsResponse{
+			Transactions: page,
+			LatestLedger: latest,
+			OldestLedger: oldest,
+		}
+		if len(page) > 0 {
+			resp.Cursor = transactionCursor(page[len(page)-1])
+		} else if hasCursor {
+			resp.Cursor = req.Pagination.Cursor
+		}
+		return resp
+	}
+
+	if b.Empty {
+		return respond(nil), nil
+	}
+
+	var out []protocol.TransactionInfo
+	for _, tx := range s.transactions {
+		if hasCursor {
+			if transactionCursor(tx) > req.Pagination.Cursor {
+				out = append(out, tx)
+			}
+			continue
+		}
+		if req.StartLedger == 0 || tx.Ledger >= req.StartLedger {
+			out = append(out, tx)
+		}
+	}
+
+	limit := s.pageLimit
+	if req.Pagination != nil && req.Pagination.Limit > 0 && int(req.Pagination.Limit) < limit {
+		limit = int(req.Pagination.Limit)
+	}
+	if len(out) > limit {
+		out = out[:limit]
+	}
+	return respond(out), nil
+}
+
+func transactionCursor(tx protocol.TransactionInfo) string {
+	return fmt.Sprintf("%010d-%06d", tx.Ledger, tx.ApplicationOrder)
 }
 
 // GetLatestLedger implements rpc.Client.

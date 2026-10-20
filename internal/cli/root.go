@@ -17,6 +17,7 @@ import (
 	"github.com/spf13/cobra"
 
 	"github.com/stellar-optics/stellar-prism/pkg/rpc"
+	"github.com/stellar-optics/stellar-prism/pkg/stream"
 )
 
 // Version is the build version, overridden at release time via ldflags:
@@ -26,18 +27,56 @@ var Version = "dev"
 
 // newClient constructs the RPC client used by every command.
 //
-// It is a variable so tests can substitute an in-memory fake and exercise the
-// commands end to end without a network. Production code never reassigns it.
-var newClient = func(url string, timeout time.Duration) rpc.Client {
-	return rpc.New(url, timeout)
+// More than one URL produces a stream.Pool, so every command gains failover
+// without knowing about it. It is a variable so tests can substitute an
+// in-memory fake and exercise the commands end to end without a network.
+// Production code never reassigns it.
+var newClient = func(urls []string, timeout time.Duration) (rpc.Client, error) {
+	if len(urls) == 1 {
+		return rpc.New(urls[0], timeout), nil
+	}
+	return stream.NewPool(urls, stream.WithClientFactory(func(url string) rpc.Client {
+		return rpc.New(url, timeout)
+	}))
+}
+
+// client resolves the configured endpoints and builds the client every
+// command shares.
+func client(g *globalFlags) (rpc.Client, error) {
+	return newClient(rpc.ResolveURLs(g.rpcURLs), g.timeout)
+}
+
+// openClient resolves the configured endpoints, builds the client and returns
+// the deferrable cleanup every command uses.
+func openClient(g *globalFlags, stderr io.Writer) (rpc.Client, func(), error) {
+	c, err := client(g)
+	if err != nil {
+		return nil, nil, err
+	}
+	return c, func() { closeClient(c, stderr) }, nil
+}
+
+// closeClient releases a client and reports a failure on stderr. Closing a
+// pool stops its health probe; for a single client it simply releases HTTP
+// resources, so the failure is not worth aborting an otherwise finished
+// command over.
+func closeClient(c rpc.Client, stderr io.Writer) {
+	closer, ok := c.(io.Closer)
+	if !ok {
+		return
+	}
+	if err := closer.Close(); err != nil {
+		fmt.Fprintf(stderr, "prism: closing rpc client: %v\n", err)
+	}
 }
 
 // globalFlags holds options shared by every subcommand.
 type globalFlags struct {
 	// color is one of "auto", "always" or "never", matching lens.
 	color string
-	// rpcURL overrides the endpoint; empty falls back to the environment.
-	rpcURL string
+	// rpcURLs overrides the endpoints; empty falls back to the environment.
+	// Repeating the flag builds a failover pool.
+	rpcURLs []string
 	// timeout bounds a single RPC call.
 	timeout time.Duration
 }
@@ -90,8 +129,8 @@ official ` + "`stellar events`" + ` command does that better. prism is for watch
 
 	root.PersistentFlags().StringVar(&g.color, "color", "auto",
 		`when to colourise output: "auto", "always" or "never"`)
-	root.PersistentFlags().StringVar(&g.rpcURL, "rpc-url", "",
-		"Soroban RPC endpoint (default $"+rpc.URLEnvVar+", else "+rpc.DefaultURL+")")
+	root.PersistentFlags().StringArrayVar(&g.rpcURLs, "rpc-url", nil,
+		"Soroban RPC endpoint; repeat for a failover pool (default $"+rpc.URLEnvVar+", else "+rpc.DefaultURL+")")
 	root.PersistentFlags().DurationVar(&g.timeout, "rpc-timeout", 30*time.Second,
 		"timeout for a single RPC call")
 
@@ -99,7 +138,9 @@ official ` + "`stellar events`" + ` command does that better. prism is for watch
 		newEventsCmd(g, stdout, stderr),
 		newLedgersCmd(g, stdout, stderr),
 		newTransactionsCmd(g, stdout, stderr),
-		newTxCmd(g, stdout),
+		newStorageCmd(g, stdout, stderr),
+		newWASMCmd(g, stdout, stderr),
+		newTxCmd(g, stdout, stderr),
 		newVersionCmd(stdout),
 	)
 	return root

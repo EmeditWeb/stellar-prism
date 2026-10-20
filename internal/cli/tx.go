@@ -10,11 +10,9 @@ import (
 
 	"github.com/stellar-optics/stellar-xdr-lens/pkg/lens"
 	lensformat "github.com/stellar-optics/stellar-xdr-lens/pkg/lens/format"
-
-	"github.com/stellar-optics/stellar-prism/pkg/rpc"
 )
 
-func newTxCmd(g *globalFlags, stdout io.Writer) *cobra.Command {
+func newTxCmd(g *globalFlags, stdout, stderr io.Writer) *cobra.Command {
 	var (
 		asJSON    bool
 		verbose   bool
@@ -34,7 +32,11 @@ without the copy-and-paste.`,
   prism tx 3389e9f0a1b2c3... --fail-on-error`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			client := newClient(rpc.ResolveURL(g.rpcURL), g.timeout)
+			client, closeClient, err := openClient(g, stderr)
+			if err != nil {
+				return err
+			}
+			defer closeClient()
 
 			resp, err := client.GetTransaction(cmd.Context(),
 				protocol.GetTransactionRequest{Hash: args[0]})

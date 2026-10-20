@@ -21,6 +21,12 @@ const (
 	KindLedger Kind = "ledger"
 	// KindTransaction is a Stellar transaction.
 	KindTransaction Kind = "transaction"
+	// KindStorageChange is a contract data, contract code or TTL entry
+	// mutation observed in transaction metadata.
+	KindStorageChange Kind = "storage_change"
+	// KindWASMDeployment is a WASM upload or contract creation derived from a
+	// transaction envelope.
+	KindWASMDeployment Kind = "wasm_deployment"
 )
 
 // Record is one item in a stream, whatever its source.
@@ -46,6 +52,10 @@ type Record struct {
 	Close *LedgerClose
 	// Transaction is set when Kind is KindTransaction.
 	Transaction *Transaction
+	// StorageChange is set when Kind is KindStorageChange.
+	StorageChange *StorageChange
+	// WASMDeployment is set when Kind is KindWASMDeployment.
+	WASMDeployment *WASMEvent
 }
 
 // Event is a Soroban event as delivered by RPC. The XDR fields are kept in
@@ -91,4 +101,56 @@ type Transaction struct {
 	ResultXDR string
 	// ResultMetaXDR is the base64 TransactionMeta.
 	ResultMetaXDR string
+}
+
+// StorageChange is a single contract-related ledger entry mutation extracted
+// from a transaction's result metadata.
+//
+// The XDR fields stay base64-encoded for the same reason as Event: only the
+// sinks that render them need to decode.
+type StorageChange struct {
+	// ChangeType is "created", "updated", "removed" or "restored".
+	ChangeType string
+	// EntryType is "contract_data", "contract_code" or "ttl".
+	EntryType string
+	// ContractID is the strkey contract address for contract data entries.
+	ContractID string
+	// Durability is "persistent" or "temporary" for contract data entries.
+	Durability string
+	// KeyHash is the hex ledger key hash for TTL entries.
+	KeyHash string
+	// WASMHash is the hex contract code hash for contract code entries.
+	WASMHash string
+	// KeyXDR is the base64 LedgerKey, absent for created entries whose key
+	// only exists in the entry itself.
+	KeyXDR string
+	// EntryXDR is the base64 LedgerEntry, absent for removed entries.
+	EntryXDR string
+	// ChangeXDR is the base64 LedgerEntryChange exactly as the ledger emitted
+	// it, so consumers can re-decode without reconstructing anything.
+	ChangeXDR string
+}
+
+// WASMEvent is a WASM upload or contract deployment derived from a successful
+// (or, when requested, failed) transaction envelope.
+type WASMEvent struct {
+	// Action is "upload" or "create".
+	Action string
+	// ContractID is the strkey contract address for create actions.
+	ContractID string
+	// WASMHash is the hex sha256 of the uploaded code for upload actions, or
+	// the executable's code hash for create actions when known.
+	WASMHash string
+	// WASMSize is the byte length of the uploaded code, when available.
+	WASMSize int
+	// Executable describes how the contract was created: "wasm", "stellar_asset"
+	// or another future executable type.
+	Executable string
+	// TxHash is the hex hash of the transaction that carried the host
+	// function.
+	TxHash string
+	// OpIndex is the zero-based operation index within the transaction.
+	OpIndex uint32
+	// Successful indicates whether the transaction succeeded.
+	Successful bool
 }

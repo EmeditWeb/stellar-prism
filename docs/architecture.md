@@ -27,7 +27,12 @@ RPC ───►│  Source  ├───────────►│ Tailer �
         └──────────┘            └────────┘            └──────┘
          events.go               tail.go               ndjson.go
          ledgers.go            cursor, dedup,          human.go
-                               backoff, gaps            (via lens)
+         transactions.go       backoff, gaps           file_rotator.go
+         storage_changes.go                          (via lens)
+         wasm_events.go
+              ▲
+              │ (optional)
+         stream.Pool  — round-robin + failover over several RPC URLs
 ```
 
 One goroutine, no channels. The tailer fetches a page, emits its records
@@ -47,10 +52,15 @@ pkg/stream/
   tail.go             the state machine
   events.go           contract events source
   ledgers.go          ledger close source
+  transactions.go     transaction source
+  storage_changes.go  contract storage mutations (from tx meta)
+  wasm_events.go      WASM uploads and contract deployments
+  pool.go             multi-endpoint failover RPC client
   clock.go            Clock and Backoff, both injectable
 pkg/sink/
   ndjson.go           NDJSON, one object per line
   human.go            terminal output, payloads via lens
+  file_rotator.go     size/time rotating file sink, optional gzip
 ```
 
 ## The state machine
@@ -135,6 +145,72 @@ immediate finality, and there is no reorg. Code to handle rewritten history
 would be untestable and would imply a hazard that does not exist. The
 realistic adjacent failure is a load-balanced RPC pool serving from a lagging
 backend, which reports an *older* `LatestLedger`; that case is tested.
+
+## Multi-endpoint failover (`pkg/stream/pool.go`)
+
+`--rpc-url` may be repeated (or `SOROBAN_RPC_URL` may be comma-separated).
+With more than one URL, `internal/cli` builds a `stream.Pool` instead of a
+single `rpc.Client`, so every command gains failover without knowing about it.
+
+- Calls are distributed **round-robin** across healthy endpoints.
+- A retryable failure marks the endpoint unhealthy and puts it in a cooldown
+  (default 30s); the same call is retried on the next endpoint.
+- Permanent errors (`rpc.Permanent`) stop failover immediately — retrying a
+  malformed cursor on another backend cannot help.
+- When **every** endpoint is cooling down, the one closest to recovery is
+  still tried: a stale health mark is more likely than a total outage, and the
+  call itself is the authoritative check.
+- A background goroutine probes unhealthy endpoints (`GetLatestLedger`) and
+  restores them as they recover. `Close` cancels the probe and waits, so a
+  Pool never leaks a goroutine.
+
+Options: `WithHealthInterval` (0 disables the probe), `WithHealthTimeout`,
+`WithFailureCooldown`, `WithClientFactory` (tests inject fakes).
+
+## Derived transaction streams
+
+Soroban RPC has no dedicated endpoints for storage mutations or deployments.
+Both streams therefore wrap `TransactionSource` and decode each transaction's
+envelope / result metadata, so pagination, cursors and the tailer's delivery
+guarantee apply unchanged.
+
+### Contract storage changes (`prism storage`)
+
+`StorageChangeSource` decodes `ResultMetaXDR` and emits one record per
+contract-related ledger entry mutation: `contract_data`, `contract_code` or
+`ttl`, with change type `created` / `updated` / `removed` / `restored`.
+Filters (`--contract`, `--change`, `--entry`) are validated up front so a
+typo fails immediately rather than streaming nothing.
+
+### WASM uploads and deployments (`prism wasm`)
+
+`WASMSource` decodes each envelope's `InvokeHostFunction` operations and
+emits `upload` (sha256 of the WASM bytes) or `create` (contract ID derived
+from the network passphrase). Failed transactions are skipped unless
+`--include-failed` is set. Contract IDs use the same derivation as the
+network, so `--network-passphrase` must match the chain being streamed
+(defaults to testnet).
+
+Both sources synthesise fixed-width zero-padded IDs (`%010d-%06d-…`) from
+the ledger sequence, preserving the lexicographic-order contract the tailer
+depends on.
+
+## Rotating file sink (`--output-file` + `--rotate-*`)
+
+Every streaming command accepts `--output-file`. When set, the chosen format
+(NDJSON or human) is built on top of a `sink.RotatingWriter`:
+
+| Flag | Meaning |
+|---|---|
+| `--rotate-size` | rotate before a write would exceed N bytes |
+| `--rotate-interval` | rotate once the active file has been open this long |
+| `--rotate-compress` | gzip each rotated file |
+| `--rotate-keep` | keep at most N rotated files (0 keeps all) |
+
+Rotated files are named `<path>.<UTC timestamp>` (plus `.gz` when
+compressed). Rotation is synchronous; the active file is reopened before
+pruning, so a failed prune cannot stop the stream. `--rotate-*` without
+`--output-file` is rejected.
 
 ## Testing the guarantee
 

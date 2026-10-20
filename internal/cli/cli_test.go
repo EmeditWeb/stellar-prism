@@ -21,7 +21,7 @@ import (
 func withFake(t *testing.T, srv *fakerpc.Server) {
 	t.Helper()
 	original := newClient
-	newClient = func(string, time.Duration) rpc.Client { return srv }
+	newClient = func([]string, time.Duration) (rpc.Client, error) { return srv, nil }
 	t.Cleanup(func() { newClient = original })
 }
 
